@@ -4,16 +4,16 @@ import torch.nn.functional as F
 
 
 class LoRALayer(nn.Module):
-    """LoRA layer for linear transformations."""
+    """Capa LoRA (Low-Rank Adaptation) para transformaciones lineales."""
     
     def __init__(self, original_layer, rank=4, alpha=1.0):
         """
-        Initialize LoRA layer.
+        Inicializa la capa LoRA.
         
         Args:
-            original_layer: The original linear layer to wrap
-            rank: The rank of the LoRA decomposition
-            alpha: Scaling parameter for LoRA
+            original_layer: La capa linear original a envolver
+            rank: El rango de la descomposición LoRA
+            alpha: Parámetro de escalado para LoRA
         """
         super().__init__()
         self.original_layer = original_layer
@@ -21,56 +21,60 @@ class LoRALayer(nn.Module):
         self.alpha = alpha
         self.scaling = alpha / rank
         
-        # LoRA matrices
+        # Matrices LoRA: A (down-projection) y B (up-projection)
         self.lora_A = nn.Parameter(torch.randn(rank, original_layer.in_features) * 0.02)
         self.lora_B = nn.Parameter(torch.zeros(original_layer.out_features, rank))
         
-        # Freeze original parameters
+        # Congelar parámetros originales para que no se entrenen
         for param in self.original_layer.parameters():
             param.requires_grad = False
     
     def forward(self, x):
         """
-        Forward pass through LoRA layer.
+        Paso hacia adelante a través de la capa LoRA.
         
-        The LoRA forward pass should:
-        1. Compute the original layer output
-        2. Compute the LoRA path: x -> A -> B -> scale
-            2a: Apply Layer A (down-projection)
-            2b: Apply Layer B (up-projection)  
-            2c: Multiply by the scale
-        3. Add the LoRA output to the original output
+        El paso forward de LoRA debe:
+        1. Calcular la salida de la capa original
+        2. Calcular el camino LoRA: x -> A -> B -> escalar
+            2a: Aplicar Capa A (down-projection)
+            2b: Aplicar Capa B (up-projection)  
+            2c: Multiplicar por la escala
+        3. Añadir la salida LoRA a la salida original
         
         Args:
-            x: Input tensor of shape (batch, seq, in_features)
+            x: Tensor de entrada de forma (batch, seq, in_features)
             
         Returns:
-            Output tensor of shape (batch, seq, out_features)
+            Tensor de salida de forma (batch, seq, out_features)
         """
-        # Compute the original layer output
+        # Calcular la salida de la capa original
         original_output = self.original_layer(x)
 
-        # Compute the LoRA path
-        lora_output = F.linear(x, self.lora_B.t()) * self.scaling
-        lora_output = F.linear(lora_output, self.lora_A.t())
+        # Calcular el camino LoRA: x -> A -> B con escalado
+        # Para F.linear necesitamos transponer las matrices correctamente
+        # lora_A: (rank, in_features) -> necesitamos (rank, in_features) como peso en F.linear
+        lora_output = torch.matmul(x, self.lora_A.t())  # x @ A.T = (batch*seq, in_features) @ (in_features, rank)
+        # lora_B: (out_features, rank) -> es correcto para F.linear
+        lora_output = F.linear(lora_output, self.lora_B)  # (batch*seq, rank) con peso (out_features, rank)
+        lora_output = lora_output * self.scaling  # Aplicar escalado
 
-        # Add the LoRA output to the original output
+        # Añadir la salida LoRA a la salida original (conexión residual)
         return original_output + lora_output
 
 
 def apply_lora(model, rank=4, alpha=1.0):
     """
-    Apply LoRA to attention projection layers in the model.
+    Aplica LoRA a las capas de proyección de atención en el modelo.
     
     Args:
-        model: The transformer model to modify
-        rank: LoRA rank parameter
-        alpha: LoRA alpha parameter
+        model: El modelo transformer a modificar
+        rank: Parámetro de rango LoRA
+        alpha: Parámetro alfa LoRA
         
     Returns:
-        The modified model with LoRA applied
+        El modelo modificado con LoRA aplicado
     """
-    # Apply LoRA recursively to all modules
+    # Aplicar LoRA recursivamente a todos los módulos
     modules_replaced = 0
     
     def apply_lora_recursive(parent_module, module_name=""):
@@ -79,15 +83,16 @@ def apply_lora(model, rank=4, alpha=1.0):
         for name, child_module in parent_module.named_children():
             full_name = f"{module_name}.{name}" if module_name else name
             
-            # Check if this module should be replaced
+            # Verificar si este módulo debe ser reemplazado
             if isinstance(child_module, nn.Linear):
+                # Solo aplicar LoRA a las proyecciones de atención específicas
                 if any(proj in full_name for proj in ['compute_query', 'compute_key', 'compute_value', 'compute_output']):
                     lora_module = LoRALayer(child_module, rank=rank, alpha=alpha)
                     setattr(parent_module, name, lora_module)
                     modules_replaced += 1
-                    print(f"Applied LoRA to {full_name}")
+                    print(f"LoRA aplicado a {full_name}")
             else:
-                # Recursively apply to child modules
+                # Aplicar recursivamente a módulos hijo
                 apply_lora_recursive(child_module, full_name)
     
     apply_lora_recursive(model)
@@ -96,10 +101,10 @@ def apply_lora(model, rank=4, alpha=1.0):
 
 def count_lora_parameters(model):
     """
-    Count LoRA parameters vs total parameters.
+    Cuenta los parámetros LoRA vs parámetros totales.
     
     Args:
-        model: The model to analyze
+        model: El modelo a analizar
         
     Returns:
         tuple: (lora_params, total_params, percentage)
@@ -107,10 +112,12 @@ def count_lora_parameters(model):
     lora_params = 0
     total_params = 0
     
+    # Contar parámetros entrenable (requires_grad=True)
     for name, param in model.named_parameters():
         if param.requires_grad:
             param_count = param.numel()
             total_params += param_count
+            # Si el nombre contiene 'lora_', es un parámetro LoRA
             if 'lora_' in name:
                 lora_params += param_count
     
@@ -120,15 +127,16 @@ def count_lora_parameters(model):
 
 def get_lora_optimizer_params(model):
     """
-    Get only LoRA parameters for optimizer.
+    Obtiene solo los parámetros LoRA para el optimizador.
     
     Args:
-        model: The model to extract LoRA parameters from
+        model: El modelo del cual extraer los parámetros LoRA
         
     Returns:
-        list: List of LoRA parameters
+        list: Lista de parámetros LoRA
     """
     lora_params = []
+    # Solo incluir parámetros LoRA que requieren gradiente
     for name, param in model.named_parameters():
         if param.requires_grad and 'lora_' in name:
             lora_params.append(param)
@@ -137,22 +145,22 @@ def get_lora_optimizer_params(model):
 
 def merge_lora_weights(model):
     """
-    Merge LoRA weights back into the original linear layers.
-    This creates a standard model without LoRA structure.
+    Fusiona los pesos LoRA de vuelta a las capas lineales originales.
+    Esto crea un modelo estándar sin estructura LoRA.
     """
     def merge_lora_recursive(module):
         for name, child_module in module.named_children():
             if isinstance(child_module, LoRALayer):
-                # Calculate the merged weight: W_original + (B @ A) * scaling
-                # lora_A shape: (rank, in_features)
-                # lora_B shape: (out_features, rank)
-                # We need: lora_B @ lora_A to get (out_features, in_features)
+                # Calcular el peso fusionado: W_original + (B @ A) * scaling
+                # lora_A forma: (rank, in_features)
+                # lora_B forma: (out_features, rank)
+                # Necesitamos: lora_B @ lora_A para obtener (out_features, in_features)
                 lora_weight = torch.mm(child_module.lora_B, child_module.lora_A) * child_module.scaling
                 
-                # Merge with original weight
+                # Fusionar con el peso original
                 merged_weight = child_module.original_layer.weight + lora_weight
                 
-                # Create new linear layer with merged weights
+                # Crear nueva capa lineal con pesos fusionados
                 merged_layer = nn.Linear(
                     child_module.original_layer.in_features,
                     child_module.original_layer.out_features,
@@ -162,7 +170,7 @@ def merge_lora_weights(model):
                 if child_module.original_layer.bias is not None:
                     merged_layer.bias.data = child_module.original_layer.bias.data
                 
-                # Replace the LoRA layer with merged layer
+                # Reemplazar la capa LoRA con la capa fusionada
                 setattr(module, name, merged_layer)
             else:
                 merge_lora_recursive(child_module)

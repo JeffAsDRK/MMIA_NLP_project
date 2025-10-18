@@ -117,7 +117,7 @@ python run_llama.py --option prompt --batch_size 10 --train data/sst-train.txt -
 
 **CFIMDB Dataset:**
 ```bash
-python run_llama.py --option prompt --batch_size 10 --train data/cfimdb-train.txt --dev data/cfimdb-dev.txt --test data/cfimdb-test.txt --label-names data/cfimdb-label-mapping.json --dev_out cfimdb-dev-prompting-output.txt --test_out cfimdb-test-prompting-output.txt [--use_gpu]
+
 ```
 - Dev Accuracy: 0.490 (0.000)
 - Test Accuracy: 0.109 (0.000)
